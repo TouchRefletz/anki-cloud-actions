@@ -27,7 +27,7 @@ jobs:
       - name: Instalar Dependências do Sistema (Xvfb & Bibliotecas Qt)
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb libxcb-cursor0 libnss3 libasound2 libegl1 libxkbcommon-x11-0 zstd curl jq
+          sudo apt-get install -y xvfb libxcb-cursor0 libxcb-xinerama0 libnss3 libegl1 libxkbcommon-x11-0 libgl1-mesa-dri zstd curl jq libasound2t64 || sudo apt-get install -y libasound2
 
       - name: Instalar Anki Oficial Mais Recente (Linux x86_64)
         run: |
