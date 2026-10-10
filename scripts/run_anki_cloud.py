@@ -5,8 +5,8 @@ Orquestrador do Anki na Nuvem (GitHub Actions).
 Responsabilidades:
 1. Configurar ambiente gráfico virtual (Xvfb) no Linux.
 2. Baixar e instalar automaticamente a versão mais recente do Anki MCP Server.
-3. Configurar autenticação no AnkiWeb e baixar os baralhos atualizados.
-4. Iniciar o Anki Headless e expor o MCP na porta 3141.
+3. Pré-configurar o perfil 'User 1' para inicialização sem telas de bloqueio.
+4. Iniciar o Anki Headless, fazer streaming dos logs e aguardar a porta 3141 responder.
 5. Iniciar o túnel Ngrok no domínio fixo configurado.
 6. Fornecer endpoint de Health Check e comando de desligamento pela IA.
 7. Monitorar tempo de sessão programado.
@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -71,11 +72,19 @@ def setup_virtual_display():
         logger.info("Iniciando tela gráfica virtual (Xvfb :99)...")
         os.environ["DISPLAY"] = ":99"
         subprocess.Popen(
-            ["Xvfb", ":99", "-screen", "0", "1024x768x24", "-ac"],
+            ["Xvfb", ":99", "-screen", "0", "1280x1024x24", "-ac", "+extension", "GLX", "+render", "-noreset"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        time.sleep(1)
+        time.sleep(2)
+
+
+def preseed_profile():
+    """Pré-cria a pasta do perfil para o Anki carregar direto sem popup de idioma."""
+    ANKI_BASE_DIR.mkdir(parents=True, exist_ok=True)
+    user_profile = ANKI_BASE_DIR / "User 1"
+    user_profile.mkdir(parents=True, exist_ok=True)
+    logger.info("Perfil 'User 1' pré-configurado.")
 
 
 def install_latest_ankimcp():
@@ -113,7 +122,6 @@ def install_latest_ankimcp():
 
     except Exception as e:
         logger.warning(f"Não foi possível baixar via GitHub Releases ({e}). Usando fallback...")
-        # Fallback de configuração caso ocorra timeout no GitHub API
         mcp_addon_dir.mkdir(exist_ok=True)
 
     # Configuração do MCP Server (Porta 3141, HTTP habilitado e API Key)
@@ -158,41 +166,43 @@ ANKIWEB_PASSWORD = "{ANKIWEB_PASSWORD}"
 SHUTDOWN_FILE = "/tmp/anki_shutdown_requested"
 SYNC_FLAG_FILE = "/tmp/anki_synced_ok"
 
-def on_profile_loaded():
-    logger.info("[CloudHelper] Perfil carregado.")
+def on_profile_loaded(*args, **kwargs):
+    print("[CloudHelper] Hook de perfil disparado!", flush=True)
     if ANKIWEB_USER and ANKIWEB_PASSWORD:
         try:
             auth = mw.pm.sync_auth()
             if not auth or not auth.hkey:
-                logger.info(f"[CloudHelper] Autenticando com AnkiWeb para {{ANKIWEB_USER}}...")
+                print(f"[CloudHelper] Autenticando com AnkiWeb para {{ANKIWEB_USER}}...", flush=True)
                 new_auth = mw.col.sync_login(ANKIWEB_USER, ANKIWEB_PASSWORD)
                 mw.pm.set_sync_auth(new_auth)
-                logger.info("[CloudHelper] Login no AnkiWeb concluído!")
+                print("[CloudHelper] Login no AnkiWeb concluído com sucesso!", flush=True)
             
-            logger.info("[CloudHelper] Iniciando sincronização com AnkiWeb...")
+            print("[CloudHelper] Disparando sincronização inicial com AnkiWeb...", flush=True)
             mw.on_sync_button_clicked()
             with open(SYNC_FLAG_FILE, "w") as f:
                 f.write("synced")
         except Exception as e:
-            logger.error(f"[CloudHelper] Erro no login/sync AnkiWeb: {{e}}")
+            print(f"[CloudHelper] Erro no login/sync AnkiWeb: {{e}}", flush=True)
 
-    # Inicia timer de verificação de desligamento
     timer = QTimer(mw)
     timer.timeout.connect(check_shutdown_signal)
     timer.start(2000)
 
 def check_shutdown_signal():
     if os.path.exists(SHUTDOWN_FILE):
-        logger.info("[CloudHelper] Sinal de desligamento detectado! Sincronizando antes de sair...")
+        print("[CloudHelper] Sinal de desligamento detectado! Sincronizando antes de sair...", flush=True)
         try:
             mw.on_sync_button_clicked()
             time.sleep(2)
         except Exception as e:
-            logger.error(f"[CloudHelper] Erro ao sincronizar no shutdown: {{e}}")
-        logger.info("[CloudHelper] Fechando Anki...")
+            print(f"[CloudHelper] Erro ao sincronizar no shutdown: {{e}}", flush=True)
+        print("[CloudHelper] Fechando Anki...", flush=True)
         mw.close()
 
-gui_hooks.profile_did_open.append(on_profile_loaded)
+try:
+    gui_hooks.profile_did_open.append(on_profile_loaded)
+except Exception as e:
+    print(f"[CloudHelper] Falha ao registrar hook: {{e}}", flush=True)
 '''
     with open(helper_dir / "__init__.py", "w", encoding="utf-8") as f:
         f.write(helper_code)
@@ -234,7 +244,7 @@ class HealthHandler(BaseHTTPRequestHandler):
             self.end_headers()
 
     def log_message(self, format, *args):
-        return  # Silenciar logs para não poluir o terminal
+        return
 
 
 def start_health_server():
@@ -243,6 +253,21 @@ def start_health_server():
     t = Thread(target=server.serve_forever, daemon=True)
     t.start()
     logger.info("Health Check server ativo na porta 3142.")
+
+
+def wait_for_port(port, timeout=90):
+    """Aguarda até que a porta local esteja realmente aberta e aceitando conexões."""
+    logger.info(f"Aguardando porta {port} abrir...")
+    start = time.time()
+    while time.time() - start < timeout:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(1.0)
+            if s.connect_ex(("127.0.0.1", port)) == 0:
+                logger.info(f"✅ Porta {port} está ABERTA e respondendo!")
+                return True
+        time.sleep(2)
+    logger.warning(f"⚠️ Porta {port} ainda não respondeu após {timeout}s.")
+    return False
 
 
 def start_ngrok():
@@ -274,12 +299,31 @@ def main():
 
     check_prerequisites()
     setup_virtual_display()
+    preseed_profile()
     install_latest_ankimcp()
     install_cloud_helper_addon()
     start_health_server()
 
-    logger.info("Iniciando o Anki em modo headless...")
-    anki_proc = subprocess.Popen(["anki"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    logger.info("Iniciando o Anki com perfil 'User 1'...")
+    anki_proc = subprocess.Popen(
+        ["anki", "-p", "User 1"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+
+    # Thread para repassar logs do Anki ao console em tempo real
+    def stream_anki_logs():
+        if anki_proc.stdout:
+            for line in iter(anki_proc.stdout.readline, ""):
+                if line.strip():
+                    print(f"[Anki Log] {line.strip()}", flush=True)
+
+    Thread(target=stream_anki_logs, daemon=True).start()
+
+    # Espera ativa pela porta 3141 (Anki MCP)
+    wait_for_port(3141, timeout=90)
 
     ngrok_proc = start_ngrok()
 
