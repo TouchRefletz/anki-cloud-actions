@@ -3,9 +3,9 @@
 Orquestrador do Anki na Nuvem (GitHub Actions).
 
 Responsabilidades:
-1. Configurar ambiente gráfico virtual (Xvfb) no Linux.
-2. Baixar e instalar automaticamente a versão mais recente do Anki MCP Server.
-3. Pré-configurar o perfil 'User 1' para inicialização sem telas de bloqueio.
+1. Configurar ambiente gráfico virtual (Xvfb) no Linux com flags Chromium sem sandbox.
+2. Baixar e instalar a versão mais recente do Anki MCP Server E AnkiConnect.
+3. Pré-configurar o perfil 'User 1' para inicialização sem telas de bloqueio (-l en).
 4. Iniciar o Anki Headless, fazer streaming dos logs e aguardar a porta 3141 responder.
 5. Iniciar o túnel Ngrok no domínio fixo configurado.
 6. Fornecer endpoint de Health Check e comando de desligamento pela IA.
@@ -66,17 +66,21 @@ def check_prerequisites():
 
 
 def setup_virtual_display():
-    """Inicia o Xvfb (Virtual Framebuffer) caso esteja no Linux sem display gráfico."""
-    display = os.environ.get("DISPLAY")
-    if not display:
-        logger.info("Iniciando tela gráfica virtual (Xvfb :99)...")
-        os.environ["DISPLAY"] = ":99"
-        subprocess.Popen(
-            ["Xvfb", ":99", "-screen", "0", "1280x1024x24", "-ac", "+extension", "GLX", "+render", "-noreset"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        time.sleep(2)
+    """Configura ambiente gráfico virtual e desabilita sandboxing do WebEngine no Linux."""
+    logger.info("Configurando ambiente gráfico virtual e flags do WebEngine...")
+    os.environ["DISPLAY"] = ":99"
+    os.environ["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --disable-gpu --disable-software-rasterizer"
+    os.environ["QT_QPA_PLATFORM"] = "xcb"
+    os.environ["LANG"] = "en_US.UTF-8"
+    os.environ["LC_ALL"] = "en_US.UTF-8"
+
+    subprocess.Popen(
+        ["Xvfb", ":99", "-screen", "0", "1280x1024x24", "-ac", "+extension", "GLX", "+render", "-noreset"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    time.sleep(2)
 
 
 def preseed_profile():
@@ -141,6 +145,42 @@ def install_latest_ankimcp():
     with open(config_file, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
     logger.info("Configuração do Anki MCP Server gravada na porta 3141.")
+
+
+def install_ankiconnect():
+    """Instala o AnkiConnect para permitir integrações legadas ou híbridas."""
+    ac_dir = ADDONS_DIR / "2055492159"
+    ac_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        logger.info("Baixando e instalando AnkiConnect...")
+        url = "https://github.com/FooSoft/anki-connect/archive/refs/heads/master.zip"
+        zip_path = Path("/tmp/ankiconnect.zip")
+        urllib.request.urlretrieve(url, zip_path)
+        with zipfile.ZipFile(zip_path, "r") as z:
+            for member in z.namelist():
+                if member.startswith("anki-connect-master/plugin/"):
+                    rel = member.replace("anki-connect-master/plugin/", "")
+                    if rel:
+                        dest = ac_dir / rel
+                        if member.endswith("/"):
+                            dest.mkdir(parents=True, exist_ok=True)
+                        else:
+                            dest.parent.mkdir(parents=True, exist_ok=True)
+                            with z.open(member) as src, open(dest, "wb") as dst:
+                                dst.write(src.read())
+        config_file = ac_dir / "config.json"
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump({
+                "apiKey": None,
+                "apiLogPath": None,
+                "ignoreNotices": [],
+                "webBindAddress": "0.0.0.0",
+                "webBindPort": 8765,
+                "webCorsOriginList": ["*"]
+            }, f, indent=2)
+        logger.info("AnkiConnect instalado com sucesso na porta 8765.")
+    except Exception as e:
+        logger.warning(f"Falha ao instalar AnkiConnect opcional: {e}")
 
 
 def install_cloud_helper_addon():
@@ -224,6 +264,7 @@ class HealthHandler(BaseHTTPRequestHandler):
                 "remaining_minutes": remaining_m,
                 "total_duration_minutes": DURATION_MINUTES,
                 "mcp_port": 3141,
+                "ankiconnect_port": 8765,
                 "ankiweb_synced": Path("/tmp/anki_synced_ok").exists(),
             }
             self.send_response(200)
@@ -301,12 +342,13 @@ def main():
     setup_virtual_display()
     preseed_profile()
     install_latest_ankimcp()
+    install_ankiconnect()
     install_cloud_helper_addon()
     start_health_server()
 
-    logger.info("Iniciando o Anki com perfil 'User 1'...")
+    logger.info("Iniciando o Anki (sem sandbox do Chromium) com perfil 'User 1'...")
     anki_proc = subprocess.Popen(
-        ["anki", "-p", "User 1"],
+        ["anki", "-l", "en", "-p", "User 1"],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
