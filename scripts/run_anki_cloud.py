@@ -4,8 +4,8 @@ Orquestrador do Anki na Nuvem (GitHub Actions).
 
 Responsabilidades:
 1. Configurar ambiente gráfico virtual (Xvfb) no Linux com flags Chromium sem sandbox.
-2. Baixar e instalar a versão mais recente do Anki MCP Server E AnkiConnect.
-3. Pré-configurar o perfil 'User 1' para inicialização sem telas de bloqueio (-l en).
+2. Pré-criar o prefs21.db com o perfil 'User 1' para eliminar diálogos de primeiro uso.
+3. Baixar e instalar o Anki MCP Server e o AnkiConnect.
 4. Iniciar o Anki Headless, fazer streaming dos logs e aguardar a porta 3141 responder.
 5. Iniciar o túnel Ngrok no domínio fixo configurado.
 6. Fornecer endpoint de Health Check e comando de desligamento pela IA.
@@ -16,8 +16,10 @@ Responsabilidades:
 import json
 import logging
 import os
+import pickle
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import time
@@ -84,11 +86,44 @@ def setup_virtual_display():
 
 
 def preseed_profile():
-    """Pré-cria a pasta do perfil para o Anki carregar direto sem popup de idioma."""
+    """
+    Pré-cria o banco de preferências (prefs21.db) com _global e User 1 registrados.
+    Isso elimina totalmente os diálogos de seleção de idioma e escolha de perfil no primeiro boot!
+    """
     ANKI_BASE_DIR.mkdir(parents=True, exist_ok=True)
     user_profile = ANKI_BASE_DIR / "User 1"
     user_profile.mkdir(parents=True, exist_ok=True)
-    logger.info("Perfil 'User 1' pré-configurado.")
+
+    prefs_db = ANKI_BASE_DIR / "prefs21.db"
+    logger.info("Inicializando prefs21.db com o perfil 'User 1'...")
+
+    meta_conf = {
+        "ver": 0,
+        "updates": False,
+        "created": int(time.time()),
+        "id": 12345678,
+        "lastMsg": 0,
+        "last_run_version": 260903,
+        "lang": "en",
+        "auto_sync": True,
+        "last_loaded_profile": "User 1",
+    }
+
+    profile_conf = {
+        "name": "User 1",
+        "syncMedia": True,
+        "autoSync": True,
+    }
+
+    conn = sqlite3.connect(prefs_db)
+    cur = conn.cursor()
+    cur.execute("CREATE TABLE IF NOT EXISTS profiles (name TEXT PRIMARY KEY, data BLOB)")
+    cur.execute("INSERT OR REPLACE INTO profiles VALUES ('_global', ?)", (pickle.dumps(meta_conf, protocol=4),))
+    cur.execute("INSERT OR REPLACE INTO profiles VALUES ('User 1', ?)", (pickle.dumps(profile_conf, protocol=4),))
+    conn.commit()
+    conn.close()
+
+    logger.info("✅ Perfil 'User 1' gravado em prefs21.db (firstRun ignorado com sucesso).")
 
 
 def install_latest_ankimcp():
@@ -196,6 +231,7 @@ def install_cloud_helper_addon():
 import os
 import time
 import logging
+import traceback
 from aqt import mw, gui_hooks
 from PyQt6.QtCore import QTimer
 
@@ -207,22 +243,26 @@ SHUTDOWN_FILE = "/tmp/anki_shutdown_requested"
 SYNC_FLAG_FILE = "/tmp/anki_synced_ok"
 
 def on_profile_loaded(*args, **kwargs):
-    print("[CloudHelper] Hook de perfil disparado!", flush=True)
+    print("[CloudHelper] Hook de perfil disparado com sucesso!", flush=True)
     if ANKIWEB_USER and ANKIWEB_PASSWORD:
         try:
             auth = mw.pm.sync_auth()
             if not auth or not auth.hkey:
                 print(f"[CloudHelper] Autenticando com AnkiWeb para {{ANKIWEB_USER}}...", flush=True)
                 new_auth = mw.col.sync_login(ANKIWEB_USER, ANKIWEB_PASSWORD)
-                mw.pm.set_sync_auth(new_auth)
-                print("[CloudHelper] Login no AnkiWeb concluído com sucesso!", flush=True)
+                if new_auth:
+                    mw.pm.set_sync_auth(new_auth)
+                    print("[CloudHelper] ✅ Login no AnkiWeb concluído!", flush=True)
+                else:
+                    print("[CloudHelper] ❌ Falha ao autenticar com AnkiWeb (resposta vazia)", flush=True)
             
             print("[CloudHelper] Disparando sincronização inicial com AnkiWeb...", flush=True)
             mw.on_sync_button_clicked()
             with open(SYNC_FLAG_FILE, "w") as f:
                 f.write("synced")
         except Exception as e:
-            print(f"[CloudHelper] Erro no login/sync AnkiWeb: {{e}}", flush=True)
+            print(f"[CloudHelper] ❌ ERRO CRÍTICO no login/sync AnkiWeb: {{type(e).__name__}}: {{e}}", flush=True)
+            traceback.print_exc()
 
     timer = QTimer(mw)
     timer.timeout.connect(check_shutdown_signal)
@@ -307,8 +347,13 @@ def wait_for_port(port, timeout=90):
                 logger.info(f"✅ Porta {port} está ABERTA e respondendo!")
                 return True
         time.sleep(2)
-    logger.warning(f"⚠️ Porta {port} ainda não respondeu após {timeout}s.")
-    return False
+
+    logger.error(f"❌ FALHA: Porta {port} não respondeu após {timeout}s!")
+    logger.error("Possíveis causas:")
+    logger.error("  1. O Anki MCP Server addon não carregou corretamente")
+    logger.error("  2. Erro ao fazer login no AnkiWeb (cloud_helper hook)")
+    logger.error("  3. Problema de display virtual (Xvfb)")
+    sys.exit(1)
 
 
 def start_ngrok():
