@@ -1,0 +1,59 @@
+name: Anki Cloud Server
+
+on:
+  repository_dispatch:
+    types: [start-anki, start_anki]
+  workflow_dispatch:
+    inputs:
+      duration_minutes:
+        description: 'Tempo de duração da sessão em minutos'
+        required: false
+        default: '30'
+
+jobs:
+  run-anki:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360 # Tempo máximo permitido pelo GitHub Actions
+
+    steps:
+      - name: Checkout do Repositório
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instalar Dependências do Sistema (Xvfb & Bibliotecas Qt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb libxcb-cursor0 libnss3 libasound2 libegl1 libxkbcommon-x11-0 zstd curl jq
+
+      - name: Instalar Anki Oficial Mais Recente (Linux x86_64)
+        run: |
+          echo "Buscando release oficial mais recente do Anki..."
+          ANKI_URL=$(curl -s https://api.github.com/repos/ankitects/anki/releases/latest | jq -r '.assets[] | select(.name | test("linux-x86_64.tar.zst$")) | .browser_download_url')
+          echo "Baixando: $ANKI_URL"
+          curl -L "$ANKI_URL" -o /tmp/anki.tar.zst
+          tar -I zstd -xf /tmp/anki.tar.zst -C /tmp/
+          cd /tmp/anki-*-linux-x86_64
+          sudo ./install.sh
+          which anki
+          anki --version || true
+
+      - name: Instalar Ngrok CLI
+        run: |
+          curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+          echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
+          sudo apt update && sudo apt install -y ngrok
+
+      - name: Iniciar Anki Cloud com AnkiMCP e Sincronização
+        env:
+          ANKIWEB_USER: ${{ secrets.ANKIWEB_USER }}
+          ANKIWEB_PASSWORD: ${{ secrets.ANKIWEB_PASSWORD }}
+          NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
+          NGROK_DOMAIN: ${{ secrets.NGROK_DOMAIN }}
+          ANKI_MCP_API_KEY: ${{ secrets.ANKI_MCP_API_KEY }}
+          DURATION_MINUTES: ${{ github.event.client_payload.duration_minutes || inputs.duration_minutes || 30 }}
+        run: |
+          python scripts/run_anki_cloud.py

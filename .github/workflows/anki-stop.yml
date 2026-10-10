@@ -1,0 +1,29 @@
+name: Stop Anki Cloud
+
+on:
+  repository_dispatch:
+    types: [stop-anki, stop_anki]
+  workflow_dispatch:
+
+permissions:
+  actions: write
+
+jobs:
+  stop-anki:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Encerrar Instâncias Ativas do Anki Server
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Buscando execuções ativas do Anki Cloud Server..."
+          RUN_IDS=$(gh run list --workflow="anki-server.yml" --status="in_progress" --json databaseId -q '.[].databaseId')
+          if [ -z "$RUN_IDS" ]; then
+            echo "Nenhuma execução ativa do Anki Server encontrada."
+          else
+            for ID in $RUN_IDS; do
+              echo "Cancelando execução ID: $ID..."
+              gh run cancel "$ID" || true
+            done
+            echo "Todas as instâncias ativas receberam ordem de encerramento."
+          fi

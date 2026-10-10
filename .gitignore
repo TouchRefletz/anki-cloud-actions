@@ -1,0 +1,37 @@
+# Environment variables & secrets (CRÍTICO: Nunca suba credenciais em repo público!)
+.env
+.env.local
+.env.*.local
+*.env
+
+# Anki local data, databases and media
+*.anki2
+*.anki2-journal
+*.db
+*.db-journal
+prefs21.db
+collection.media/
+collection.anki2
+user_files/
+
+# Python cache & artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+*.egg-info/
+venv/
+env/
+.venv/
+
+# Ngrok & OS files
+.ngrok.log
+*.log
+.DS_Store
+Thumbs.db
+desktop.ini
