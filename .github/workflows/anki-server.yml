@@ -35,8 +35,16 @@ jobs:
           ANKI_URL=$(curl -s https://api.github.com/repos/ankitects/anki/releases/latest | jq -r '.assets[] | select(.name | test("linux-x86_64.tar.zst$")) | .browser_download_url')
           echo "Baixando: $ANKI_URL"
           curl -L "$ANKI_URL" -o /tmp/anki.tar.zst
-          tar -I zstd -xf /tmp/anki.tar.zst -C /tmp/
-          cd /tmp/anki-*-linux-x86_64
+          mkdir -p /tmp/anki-extracted
+          tar -I zstd -xf /tmp/anki.tar.zst -C /tmp/anki-extracted/
+          ls -la /tmp/anki-extracted/
+          ANKI_DIR=$(find /tmp/anki-extracted -type f -name "install.sh" -exec dirname {} \; | head -1)
+          if [ -z "$ANKI_DIR" ]; then
+            echo "Error: Could not find install.sh in extracted Anki"
+            exit 1
+          fi
+          echo "Diretório de instalação encontrado: $ANKI_DIR"
+          cd "$ANKI_DIR"
           sudo ./install.sh
           which anki
           anki --version || true
