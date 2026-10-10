@@ -103,16 +103,30 @@ def preseed_profile():
         "created": int(time.time()),
         "id": 12345678,
         "lastMsg": 0,
-        "last_run_version": 260903,
+        "suppressUpdate": True,
+        "firstRun": False,
+        "defaultLang": "en",
         "lang": "en",
+        "last_run_version": 260903,
         "auto_sync": True,
         "last_loaded_profile": "User 1",
     }
 
     profile_conf = {
         "name": "User 1",
+        "mainWindowGeom": None,
+        "mainWindowState": None,
+        "numBackups": 50,
+        "lastOptimize": int(time.time()),
+        "searchHistory": [],
+        "syncKey": None,
         "syncMedia": True,
         "autoSync": True,
+        "allowHTML": False,
+        "importMode": 1,
+        "lastColour": "#00f",
+        "stripHTML": True,
+        "deleteMedia": False,
     }
 
     conn = sqlite3.connect(prefs_db)
