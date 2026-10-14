@@ -3,14 +3,15 @@
 Orquestrador do Anki na Nuvem (GitHub Actions).
 
 Responsabilidades:
-1. Configurar ambiente gráfico virtual (Xvfb) no Linux com flags Chromium sem sandbox.
-2. Pré-criar o prefs21.db com o perfil 'User 1' para eliminar diálogos de primeiro uso.
-3. Baixar e instalar o Anki MCP Server e o AnkiConnect.
+1. Configurar ambiente gráfico virtual (Xvfb + Openbox) no Linux com flags Chromium sem sandbox.
+2. Pré-criar o prefs21.db com o perfil 'User 1', desativando autoSync inicial e configurando gldriver6.
+3. Baixar e instalar o Anki MCP Server oficial com configurações seguras de host/origem.
 4. Iniciar o Anki Headless, fazer streaming dos logs e aguardar a porta 3141 responder.
-5. Iniciar o túnel Ngrok no domínio fixo configurado.
-6. Fornecer endpoint de Health Check e comando de desligamento pela IA.
-7. Monitorar tempo de sessão programado.
-8. Ao término ou cancelamento, sincronizar tudo de volta para o AnkiWeb e desligar limpo.
+5. Fazer login e download completo headless da coleção do AnkiWeb sem diálogos modais gráficos.
+6. Iniciar o túnel Ngrok no domínio fixo configurado registrando logs em arquivo.
+7. Fornecer endpoint de Health Check e comando de desligamento.
+8. Monitorar tempo de sessão programado.
+9. Ao término ou cancelamento, sincronizar tudo de volta para o AnkiWeb (upload headless) e desligar limpo.
 """
 
 import json
@@ -47,6 +48,8 @@ DURATION_MINUTES = float(os.environ.get("DURATION_MINUTES", os.environ.get("DEFA
 ANKI_BASE_DIR = Path.home() / ".local" / "share" / "Anki2"
 ADDONS_DIR = ANKI_BASE_DIR / "addons21"
 SHUTDOWN_FILE = Path("/tmp/anki_shutdown_requested")
+SYNC_FLAG_FILE = Path("/tmp/anki_synced_ok")
+SHUTDOWN_DONE_FILE = Path("/tmp/anki_shutdown_sync_done")
 STATUS_FILE = Path("/tmp/anki_cloud_status.json")
 
 START_TIME = time.time()
@@ -68,31 +71,66 @@ def check_prerequisites():
 
 
 def setup_virtual_display():
-    """Configura ambiente gráfico virtual e desabilita sandboxing do WebEngine no Linux."""
+    """Configura ambiente gráfico virtual (Xvfb + Openbox) e flags do WebEngine no Linux."""
     logger.info("Configurando ambiente gráfico virtual e flags do WebEngine...")
     os.environ["DISPLAY"] = ":99"
     os.environ["QTWEBENGINE_DISABLE_SANDBOX"] = "1"
     os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--no-sandbox --disable-gpu --disable-software-rasterizer"
     os.environ["QT_QPA_PLATFORM"] = "xcb"
+    os.environ["ANKI_SOFTWAREOPENGL"] = "1"
     os.environ["LANG"] = "en_US.UTF-8"
     os.environ["LC_ALL"] = "en_US.UTF-8"
 
+    # Inicia Xvfb com saída redirecionada para log
+    xvfb_log = open("/tmp/xvfb.log", "w", encoding="utf-8")
     subprocess.Popen(
         ["Xvfb", ":99", "-screen", "0", "1280x1024x24", "-ac", "+extension", "GLX", "+render", "-noreset"],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=xvfb_log,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
     )
-    time.sleep(2)
+
+    # Aguarda a criação real do socket /tmp/.X11-unix/X99 (conforme headless-anki)
+    socket_path = Path("/tmp/.X11-unix/X99")
+    start_xvfb = time.time()
+    while time.time() - start_xvfb < 10:
+        if socket_path.exists():
+            logger.info("✅ Display virtual Xvfb :99 pronto e socket ativo.")
+            break
+        time.sleep(0.2)
+    else:
+        logger.warning("Socket do Xvfb /tmp/.X11-unix/X99 não apareceu em 10s, prosseguindo...")
+
+    # Inicia o gerenciador de janelas Openbox
+    logger.info("Iniciando Window Manager (openbox)...")
+    openbox_log = open("/tmp/openbox.log", "w", encoding="utf-8")
+    subprocess.Popen(
+        ["openbox"],
+        stdout=openbox_log,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    time.sleep(1)
 
 
 def preseed_profile():
     """
     Pré-cria o banco de preferências (prefs21.db) com _global e User 1 registrados.
-    Isso elimina totalmente os diálogos de seleção de idioma e escolha de perfil no primeiro boot!
+    Elimina totalmente diálogos de primeiro boot e desativa autoSync concorrente.
+    Também grava gldriver6 com 'software' para desabilitar aceleração via hardware problemática.
     """
     ANKI_BASE_DIR.mkdir(parents=True, exist_ok=True)
     user_profile = ANKI_BASE_DIR / "User 1"
     user_profile.mkdir(parents=True, exist_ok=True)
+
+    # Força driver de software para evitar falhas de contexto OpenGL/Vulkan sem GPU
+    gldriver_file = ANKI_BASE_DIR / "gldriver6"
+    try:
+        with open(gldriver_file, "w", encoding="utf-8") as f:
+            f.write("software")
+        logger.info("✅ Driver OpenGL configurado para 'software' em gldriver6.")
+    except Exception as e:
+        logger.warning(f"Não foi possível gravar gldriver6: {e}")
 
     prefs_db = ANKI_BASE_DIR / "prefs21.db"
     logger.info("Inicializando prefs21.db com o perfil 'User 1'...")
@@ -105,10 +143,11 @@ def preseed_profile():
         "lastMsg": 0,
         "suppressUpdate": True,
         "firstRun": False,
-        "defaultLang": "en",
-        "lang": "en",
+        "defaultLang": "en_US",
+        "lang": "en_US",
         "last_run_version": 260903,
-        "auto_sync": True,
+        "auto_sync": False,
+        "last_loaded_profile_name": "User 1",
         "last_loaded_profile": "User 1",
     }
 
@@ -121,7 +160,7 @@ def preseed_profile():
         "searchHistory": [],
         "syncKey": None,
         "syncMedia": True,
-        "autoSync": True,
+        "autoSync": False,
         "allowHTML": False,
         "importMode": 1,
         "lastColour": "#00f",
@@ -137,11 +176,11 @@ def preseed_profile():
     conn.commit()
     conn.close()
 
-    logger.info("✅ Perfil 'User 1' gravado em prefs21.db (firstRun ignorado com sucesso).")
+    logger.info("✅ Perfil 'User 1' gravado em prefs21.db (firstRun ignorado e autoSync desativado).")
 
 
 def install_latest_ankimcp():
-    """Baixa e instala o Anki MCP Server oficial direto do GitHub Releases."""
+    """Baixa e instala o Anki MCP Server oficial direto do GitHub Releases com config segura."""
     ADDONS_DIR.mkdir(parents=True, exist_ok=True)
     mcp_addon_dir = ADDONS_DIR / "anki_mcp_server"
 
@@ -177,23 +216,35 @@ def install_latest_ankimcp():
         logger.warning(f"Não foi possível baixar via GitHub Releases ({e}). Usando fallback...")
         mcp_addon_dir.mkdir(exist_ok=True)
 
-    # Configuração do MCP Server (Porta 3141, HTTP habilitado e API Key)
-    config_file = mcp_addon_dir / "config.json"
+    # Configuração do MCP Server (Porta 3141, HTTP habilitado e validações de segurança)
+    allowed_hosts = [NGROK_DOMAIN, f"{NGROK_DOMAIN}:443"] if NGROK_DOMAIN else []
+    allowed_origins = [f"https://{NGROK_DOMAIN}"] if NGROK_DOMAIN else []
+
+    # Evita que validate_http_api_key() dispare um QMessageBox modal se a chave tiver < 16 chars
+    safe_api_key = ANKI_MCP_API_KEY.strip()
+    if 0 < len(safe_api_key) < 16:
+        logger.warning("ANKI_MCP_API_KEY tem menos de 16 caracteres; desabilitando chave (<16 chars) para evitar modal de aviso do AnkiMCP.")
+
     cfg = {
         "http_enabled": True,
         "http_port": 3141,
         "http_host": "0.0.0.0",
         "http_path": "",
-        "http_api_key": ANKI_MCP_API_KEY,
-        "http_allowed_hosts": ["*"],
-        "http_allowed_origins": ["*"],
+        "http_api_key": safe_api_key if len(safe_api_key) >= 16 else "",
+        "http_allowed_hosts": allowed_hosts,
+        "http_allowed_origins": allowed_origins,
         "cors_origins": ["*"],
         "max_notes_per_batch": 100,
+        "show_settings_menu_item": False,
+        "show_toolbar_indicator": False,
+        "show_sync_tooltip": False,
         "log_to_file": True,
     }
-    with open(config_file, "w", encoding="utf-8") as f:
+    with open(mcp_addon_dir / "config.json", "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2)
-    logger.info("Configuração do Anki MCP Server gravada na porta 3141.")
+    with open(mcp_addon_dir / "meta.json", "w", encoding="utf-8") as f:
+        json.dump({"config": cfg}, f, indent=2)
+    logger.info("Configuração do Anki MCP Server gravada na porta 3141 (config.json e meta.json).")
 
 
 def install_ankiconnect():
@@ -233,74 +284,173 @@ def install_ankiconnect():
 
 
 def install_cloud_helper_addon():
-    """
-    Cria um addon auxiliar leve para:
-    1. Fazer login no AnkiWeb e baixar a coleção na inicialização.
-    2. Monitorar requisição de desligamento e salvar tudo antes de sair.
-    """
+    """Instala add-on headless para login AnkiWeb, full-download no boot e full-upload no shutdown."""
     helper_dir = ADDONS_DIR / "cloud_helper"
     helper_dir.mkdir(parents=True, exist_ok=True)
 
-    helper_code = f'''
-import os
+    helper_code = f'''import os
 import time
-import logging
 import traceback
 from aqt import mw, gui_hooks
+import aqt.utils
 from PyQt6.QtCore import QTimer
 
-logger = logging.getLogger("CloudHelper")
-
-ANKIWEB_USER = "{ANKIWEB_USER}"
-ANKIWEB_PASSWORD = "{ANKIWEB_PASSWORD}"
+ANKIWEB_USER = {json.dumps(ANKIWEB_USER)}
+ANKIWEB_PASSWORD = {json.dumps(ANKIWEB_PASSWORD)}
 SHUTDOWN_FILE = "/tmp/anki_shutdown_requested"
 SYNC_FLAG_FILE = "/tmp/anki_synced_ok"
+SHUTDOWN_DONE_FILE = "/tmp/anki_shutdown_sync_done"
+_shutting_down = False
 
-def on_profile_loaded(*args, **kwargs):
-    print("[CloudHelper] Hook de perfil disparado com sucesso!", flush=True)
-    if ANKIWEB_USER and ANKIWEB_PASSWORD:
+# Blindagem Headless: impede que QMessageBox modais travem o Xvfb
+def _headless_log_box(text, *args, **kwargs):
+    print(f"[HeadlessDialogIntercepted] {{text}}", flush=True)
+    return 0
+
+aqt.utils.showWarning = _headless_log_box
+aqt.utils.showInfo = _headless_log_box
+aqt.utils.showCritical = _headless_log_box
+aqt.utils.askUser = lambda *args, **kwargs: True
+if hasattr(aqt.utils, "ask_user_dialog"):
+    aqt.utils.ask_user_dialog = lambda *args, **kwargs: None
+
+def _wait_media_sync(max_wait=45):
+    start = time.time()
+    while time.time() - start < max_wait:
         try:
-            auth = mw.pm.sync_auth()
-            if not auth or not auth.hkey:
-                print(f"[CloudHelper] Autenticando com AnkiWeb para {{ANKIWEB_USER}}...", flush=True)
-                new_auth = mw.col.sync_login(ANKIWEB_USER, ANKIWEB_PASSWORD)
-                if new_auth:
-                    mw.pm.set_sync_auth(new_auth)
-                    print("[CloudHelper] ✅ Login no AnkiWeb concluído!", flush=True)
-                else:
-                    print("[CloudHelper] ❌ Falha ao autenticar com AnkiWeb (resposta vazia)", flush=True)
-            
-            print("[CloudHelper] Disparando sincronização inicial com AnkiWeb...", flush=True)
-            mw.on_sync_button_clicked()
-            with open(SYNC_FLAG_FILE, "w") as f:
-                f.write("synced")
+            st = mw.col.media_sync_status()
+            if not st.active:
+                break
+        except Exception:
+            break
+        time.sleep(0.3)
+
+def run_headless_sync(direction="download", on_complete=None):
+    """
+    direction='download' (boot): em caso de conflito/coleção nova, baixa do AnkiWeb (upload=False).
+    direction='upload' (shutdown): em caso de conflito/schema change, envia para o AnkiWeb (upload=True).
+    """
+    if not ANKIWEB_USER or not ANKIWEB_PASSWORD:
+        print("[CloudHelper] Credenciais do AnkiWeb não configuradas, pulando sincronização.", flush=True)
+        with open(SYNC_FLAG_FILE, "w") as f:
+            f.write("skipped_no_credentials")
+        if on_complete:
+            on_complete(False)
+        return
+
+    def _worker():
+        auth = mw.pm.sync_auth()
+        if not auth or not auth.hkey:
+            masked = ANKIWEB_USER[:3] + "***" if len(ANKIWEB_USER) >= 3 else "***"
+            print(f"[CloudHelper] Autenticando no AnkiWeb ({{masked}})...", flush=True)
+            endpoint = mw.pm.sync_endpoint()
+            auth = mw.col.sync_login(
+                username=ANKIWEB_USER,
+                password=ANKIWEB_PASSWORD,
+                endpoint=endpoint,
+            )
+            mw.pm.set_sync_key(auth.hkey)
+            mw.pm.set_sync_username(ANKIWEB_USER)
+            if auth.endpoint:
+                mw.pm.set_current_sync_url(auth.endpoint)
+
+        out = mw.col.sync_collection(auth, True)
+        if out.new_endpoint:
+            mw.pm.set_current_sync_url(out.new_endpoint)
+        if out.host_number:
+            mw.pm.set_host_number(out.host_number)
+        return auth, out
+
+    def _on_done(fut):
+        try:
+            auth, out = fut.result()
+            mw.pm.save()
+            req = int(out.required)  # 0 = NO_CHANGES, 1 = NORMAL_SYNC, 2 = FULL_SYNC, 3 = FULL_DOWNLOAD, 4 = FULL_UPLOAD
+            print(f"[CloudHelper] Resultado sync_collection: required={{req}}", flush=True)
+
+            if req in (0, 1):
+                mw.col._load_scheduler()
+                mw.reset()
+                with open(SYNC_FLAG_FILE, "w") as f:
+                    f.write("synced")
+                print("[CloudHelper] ✅ Sincronização incremental concluída com sucesso!", flush=True)
+                if on_complete:
+                    on_complete(True)
+                return
+
+            # Full sync necessário (sem abrir diálogo modal!)
+            upload_flag = (direction == "upload") if req == 2 else (req == 4)
+            if direction == "download" and req in (2, 3):
+                upload_flag = False
+            elif direction == "upload" and req in (2, 4):
+                upload_flag = True
+
+            print(f"[CloudHelper] Executando Full Sync headless (upload={{upload_flag}})...", flush=True)
+            server_usn = out.server_media_usn if mw.pm.media_syncing_enabled() else None
+            gui_hooks.collection_will_temporarily_close(mw.col)
+            mw.col.close_for_full_sync()
+
+            def _full_worker():
+                mw.col.full_upload_or_download(
+                    auth=auth,
+                    server_usn=server_usn,
+                    upload=upload_flag,
+                )
+                _wait_media_sync(30)
+
+            def _on_full_done(full_fut):
+                try:
+                    mw.reopen(after_full_sync=True)
+                    mw.reset()
+                    full_fut.result()
+                    with open(SYNC_FLAG_FILE, "w") as f:
+                        f.write("synced")
+                    print(f"[CloudHelper] ✅ Full Sync (upload={{upload_flag}}) concluído!", flush=True)
+                    if on_complete:
+                        on_complete(True)
+                except Exception as e:
+                    print(f"[CloudHelper] ❌ Erro no Full Sync: {{type(e).__name__}}: {{e}}", flush=True)
+                    traceback.print_exc()
+                    if on_complete:
+                        on_complete(False)
+
+            mw.taskman.run_in_background(_full_worker, _on_full_done, uses_collection=False)
+
         except Exception as e:
             print(f"[CloudHelper] ❌ ERRO CRÍTICO no login/sync AnkiWeb: {{type(e).__name__}}: {{e}}", flush=True)
             traceback.print_exc()
+            if on_complete:
+                on_complete(False)
+
+    mw.taskman.run_in_background(_worker, _on_done, uses_collection=False)
+
+def on_profile_loaded(*args, **kwargs):
+    print("[CloudHelper] Hook profile_did_open disparado!", flush=True)
+    # Dispara o sync inicial após 500ms para permitir que o AnkiMCP finalize o bind da porta 3141
+    QTimer.singleShot(500, lambda: run_headless_sync(direction="download"))
 
     timer = QTimer(mw)
     timer.timeout.connect(check_shutdown_signal)
     timer.start(2000)
 
 def check_shutdown_signal():
-    if os.path.exists(SHUTDOWN_FILE):
-        print("[CloudHelper] Sinal de desligamento detectado! Sincronizando antes de sair...", flush=True)
-        try:
-            mw.on_sync_button_clicked()
-            time.sleep(2)
-        except Exception as e:
-            print(f"[CloudHelper] Erro ao sincronizar no shutdown: {{e}}", flush=True)
-        print("[CloudHelper] Fechando Anki...", flush=True)
-        mw.close()
+    global _shutting_down
+    if not _shutting_down and os.path.exists(SHUTDOWN_FILE):
+        _shutting_down = True
+        print("[CloudHelper] Sinal de desligamento detectado! Enviando dados ao AnkiWeb...", flush=True)
+        def _finish(ok):
+            with open(SHUTDOWN_DONE_FILE, "w") as f:
+                f.write("done")
+            print("[CloudHelper] Encerrando Anki de forma limpa...", flush=True)
+            mw.unloadProfileAndExit()
 
-try:
-    gui_hooks.profile_did_open.append(on_profile_loaded)
-except Exception as e:
-    print(f"[CloudHelper] Falha ao registrar hook: {{e}}", flush=True)
+        run_headless_sync(direction="upload", on_complete=_finish)
+
+gui_hooks.profile_did_open.append(on_profile_loaded)
 '''
     with open(helper_dir / "__init__.py", "w", encoding="utf-8") as f:
         f.write(helper_code)
-    logger.info("Addon auxiliar de sincronização instalado.")
+    logger.info("Addon auxiliar de sincronização (100% headless) instalado.")
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -319,7 +469,7 @@ class HealthHandler(BaseHTTPRequestHandler):
                 "total_duration_minutes": DURATION_MINUTES,
                 "mcp_port": 3141,
                 "ankiconnect_port": 8765,
-                "ankiweb_synced": Path("/tmp/anki_synced_ok").exists(),
+                "ankiweb_synced": SYNC_FLAG_FILE.exists(),
             }
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -365,22 +515,28 @@ def wait_for_port(port, timeout=90):
     logger.error(f"❌ FALHA: Porta {port} não respondeu após {timeout}s!")
     logger.error("Possíveis causas:")
     logger.error("  1. O Anki MCP Server addon não carregou corretamente")
-    logger.error("  2. Erro ao fazer login no AnkiWeb (cloud_helper hook)")
-    logger.error("  3. Problema de display virtual (Xvfb)")
+    logger.error("  2. Erro ao inicializar o perfil ou o display virtual (Xvfb)")
+    logger.error("  3. Modal de erro interceptado ou travando a main thread do Qt")
     sys.exit(1)
 
 
 def start_ngrok():
-    """Inicia o túnel Ngrok."""
+    """Inicia o túnel Ngrok registrando logs em /tmp/ngrok.log."""
     logger.info("Configurando Ngrok Authtoken...")
     subprocess.run(["ngrok", "config", "add-authtoken", NGROK_AUTHTOKEN], check=True)
 
-    ngrok_cmd = ["ngrok", "http", "3141"]
+    ngrok_cmd = ["ngrok", "http", "3141", "--log", "stdout"]
     if NGROK_DOMAIN:
         ngrok_cmd.extend(["--domain", NGROK_DOMAIN, "--host-header", "rewrite"])
 
     logger.info(f"Iniciando Ngrok: {' '.join(ngrok_cmd)}...")
-    proc = subprocess.Popen(ngrok_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    ngrok_log_file = open("/tmp/ngrok.log", "w", encoding="utf-8")
+    proc = subprocess.Popen(
+        ngrok_cmd,
+        stdout=ngrok_log_file,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
     time.sleep(3)
     return proc
 
@@ -388,7 +544,8 @@ def start_ngrok():
 def handle_signals(signum, frame):
     """Captura SIGINT e SIGTERM para sincronização final garantida."""
     global shutdown_event
-    logger.info("Sinal de encerramento recebido (SIGINT/SIGTERM). Solicitando desligamento gracioso...")
+    sig_name = signal.Signals(signum).name if hasattr(signal, "Signals") else str(signum)
+    logger.info(f"Sinal de encerramento recebido ({sig_name}). Solicitando desligamento gracioso...")
     SHUTDOWN_FILE.touch()
     shutdown_event = True
 
@@ -412,6 +569,7 @@ def main():
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        start_new_session=True,
     )
 
     # Thread para repassar logs do Anki ao console em tempo real
@@ -425,6 +583,18 @@ def main():
 
     # Espera ativa pela porta 3141 (Anki MCP)
     wait_for_port(3141, timeout=90)
+
+    # Aguardar sincronização inicial com AnkiWeb (até 60s) antes de liberar o Ngrok
+    if ANKIWEB_USER and ANKIWEB_PASSWORD:
+        logger.info("Aguardando confirmação da sincronização inicial do AnkiWeb (/tmp/anki_synced_ok)...")
+        sync_start = time.time()
+        while time.time() - sync_start < 60:
+            if SYNC_FLAG_FILE.exists():
+                logger.info("✅ Sincronização inicial com o AnkiWeb confirmada!")
+                break
+            time.sleep(2)
+        else:
+            logger.warning("Tempo limite de 60s aguardando sincronização inicial atingido. Continuando...")
 
     ngrok_proc = start_ngrok()
 
@@ -456,8 +626,18 @@ def main():
         time.sleep(poll_interval)
 
     # Processo de finalização limpa
-    logger.info("Aguardando sincronização final do AnkiWeb...")
-    time.sleep(5)
+    logger.info("Aguardando sincronização final com o AnkiWeb e encerramento limpo...")
+    SHUTDOWN_FILE.touch()
+
+    # Aguarda até 45s pela conclusão do sync final (/tmp/anki_shutdown_sync_done) ou encerramento do processo anki
+    shutdown_start = time.time()
+    while time.time() - shutdown_start < 45:
+        if SHUTDOWN_DONE_FILE.exists() or anki_proc.poll() is not None:
+            logger.info("✅ Confirmação de encerramento/sync final recebida!")
+            break
+        time.sleep(1)
+    else:
+        logger.warning("Tempo limite de 45s para sync final atingido.")
 
     if anki_proc.poll() is None:
         anki_proc.terminate()

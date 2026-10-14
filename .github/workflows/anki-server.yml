@@ -86,3 +86,7 @@ jobs:
           cat ~/.local/share/Anki2/logs/*.log 2>/dev/null || true
           echo "=== Logs do Ngrok ==="
           cat /tmp/ngrok.log 2>/dev/null || echo "Nenhum /tmp/ngrok.log encontrado"
+          echo "=== Logs do Xvfb ==="
+          cat /tmp/xvfb.log 2>/dev/null || echo "Nenhum /tmp/xvfb.log encontrado"
+          echo "=== Logs do Openbox ==="
+          cat /tmp/openbox.log 2>/dev/null || echo "Nenhum /tmp/openbox.log encontrado"
