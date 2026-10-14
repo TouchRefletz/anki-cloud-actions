@@ -544,7 +544,7 @@ def start_ngrok():
     logger.info("Configurando Ngrok Authtoken...")
     subprocess.run(["ngrok", "config", "add-authtoken", NGROK_AUTHTOKEN], check=True)
 
-    ngrok_cmd = ["ngrok", "http", "3141", "--log", "stdout"]
+    ngrok_cmd = ["ngrok", "http", "127.0.0.1:3141", "--log", "stdout"]
     if NGROK_DOMAIN:
         ngrok_cmd.extend(["--domain", NGROK_DOMAIN, "--host-header", "rewrite"])
 
