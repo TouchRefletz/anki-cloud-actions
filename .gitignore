@@ -35,3 +35,5 @@ env/
 .DS_Store
 Thumbs.db
 desktop.ini
+local_startup_backup/
+
