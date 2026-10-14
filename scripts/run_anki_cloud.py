@@ -557,6 +557,15 @@ def start_ngrok():
         start_new_session=True,
     )
     time.sleep(3)
+    if proc.poll() is not None:
+        logger.error("❌ Falha imediata ao iniciar o Ngrok! Verifique se outro túnel já está usando o domínio.")
+        try:
+            with open("/tmp/ngrok.log", "r", encoding="utf-8") as f:
+                logger.error(f"Log do Ngrok: {f.read().strip()}")
+        except Exception:
+            pass
+        sys.exit(1)
+
     return proc
 
 
@@ -640,6 +649,10 @@ def main():
 
         if anki_proc.poll() is not None:
             logger.warning("O processo do Anki foi encerrado.")
+            break
+
+        if ngrok_proc.poll() is not None:
+            logger.error("❌ O processo do Ngrok foi encerrado inesperadamente.")
             break
 
         time.sleep(poll_interval)
