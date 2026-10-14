@@ -24,10 +24,16 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Instalar Dependências do Sistema (Xvfb & Bibliotecas Qt)
+      - name: Instalar Dependências do Sistema (Xvfb, Openbox, MPV & Bibliotecas Qt)
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb libxcb-cursor0 libxcb-xinerama0 libnss3 libegl1 libxkbcommon-x11-0 libgl1-mesa-dri zstd curl jq libasound2t64 || sudo apt-get install -y libasound2
+          sudo apt-get install -y xvfb openbox mpv libxcb-cursor0 libxcb-xinerama0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxcb-shape0 libxcb-xfixes0 libxcb-xkb1 libxkbcommon-x11-0 libnss3 \
+            libxkbcommon0 libxcomposite1 libxdamage1 libxtst6 libxkbfile1 \
+            libegl1 libopengl0 libgl1 libgl1-mesa-dri zstd curl jq \
+            libasound2t64 || sudo apt-get install -y xvfb openbox mpv libxcb-cursor0 \
+            libxcb-xinerama0 libnss3 libegl1 libxkbcommon-x11-0 libgl1-mesa-dri zstd curl jq libasound2
 
       - name: Instalar Anki Oficial Mais Recente (Linux x86_64)
         run: |
@@ -57,6 +63,10 @@ jobs:
 
       - name: Iniciar Anki Cloud com AnkiMCP e Sincronização
         env:
+          PYTHONUNBUFFERED: "1"
+          ANKI_SOFTWAREOPENGL: "1"
+          QMLSCENE_DEVICE: "softwarecontext"
+          LIBGL_ALWAYS_SOFTWARE: "1"
           ANKIWEB_USER: ${{ secrets.ANKIWEB_USER }}
           ANKIWEB_PASSWORD: ${{ secrets.ANKIWEB_PASSWORD }}
           NGROK_AUTHTOKEN: ${{ secrets.NGROK_AUTHTOKEN }}
@@ -64,4 +74,15 @@ jobs:
           ANKI_MCP_API_KEY: ${{ secrets.ANKI_MCP_API_KEY }}
           DURATION_MINUTES: ${{ github.event.client_payload.duration_minutes || inputs.duration_minutes || 30 }}
         run: |
-          python scripts/run_anki_cloud.py
+          python -u scripts/run_anki_cloud.py
+
+      - name: Diagnóstico Pós-Execução (Logs Internos AnkiMCP e Ngrok)
+        if: always()
+        run: |
+          echo "=== Logs internos do AnkiMCP (ankimcp.log) ==="
+          cat ~/.local/share/Anki2/addons21/anki_mcp_server/user_files/ankimcp.log 2>/dev/null || echo "Nenhum ankimcp.log encontrado"
+          echo "=== Logs do Addon Manager do Anki ==="
+          ls -la ~/.local/share/Anki2/logs/ 2>/dev/null || true
+          cat ~/.local/share/Anki2/logs/*.log 2>/dev/null || true
+          echo "=== Logs do Ngrok ==="
+          cat /tmp/ngrok.log 2>/dev/null || echo "Nenhum /tmp/ngrok.log encontrado"
