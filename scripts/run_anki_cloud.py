@@ -387,30 +387,48 @@ def run_headless_sync(direction="download", on_complete=None):
 
             print(f"[CloudHelper] Executando Full Sync headless (upload={{upload_flag}})...", flush=True)
             server_usn = out.server_media_usn if mw.pm.media_syncing_enabled() else None
+
+            # Obtém credencial atualizada garantindo o endpoint do cluster específico (out.new_endpoint)
+            fresh_auth = mw.pm.sync_auth()
+            if fresh_auth and out.new_endpoint:
+                fresh_auth.endpoint = out.new_endpoint
+
             gui_hooks.collection_will_temporarily_close(mw.col)
-            mw.col.close_for_full_sync()
 
             def _full_worker():
+                try:
+                    mw.create_backup_now()
+                except Exception:
+                    pass
+                mw.col.close_for_full_sync()
                 mw.col.full_upload_or_download(
-                    auth=auth,
+                    auth=fresh_auth,
                     server_usn=server_usn,
                     upload=upload_flag,
                 )
-                _wait_media_sync(30)
 
             def _on_full_done(full_fut):
                 try:
+                    full_fut.result()
                     mw.reopen(after_full_sync=True)
                     mw.reset()
-                    full_fut.result()
+                    try:
+                        mw.media_syncer.start_monitoring()
+                    except Exception:
+                        pass
                     with open(SYNC_FLAG_FILE, "w") as f:
                         f.write("synced")
-                    print(f"[CloudHelper] ✅ Full Sync (upload={{upload_flag}}) concluído!", flush=True)
+                    print(f"[CloudHelper] ✅ Full Sync (upload={{upload_flag}}) concluído com sucesso!", flush=True)
                     if on_complete:
                         on_complete(True)
                 except Exception as e:
                     print(f"[CloudHelper] ❌ Erro no Full Sync: {{type(e).__name__}}: {{e}}", flush=True)
                     traceback.print_exc()
+                    try:
+                        mw.reopen(after_full_sync=True)
+                        mw.reset()
+                    except Exception:
+                        pass
                     if on_complete:
                         on_complete(False)
 
@@ -439,6 +457,7 @@ def check_shutdown_signal():
         _shutting_down = True
         print("[CloudHelper] Sinal de desligamento detectado! Enviando dados ao AnkiWeb...", flush=True)
         def _finish(ok):
+            _wait_media_sync(30)
             with open(SHUTDOWN_DONE_FILE, "w") as f:
                 f.write("done")
             print("[CloudHelper] Encerrando Anki de forma limpa...", flush=True)
