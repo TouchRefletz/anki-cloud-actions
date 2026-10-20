@@ -2,8 +2,9 @@ import urllib.request
 import json
 import ssl
 
+import os
 ctx = ssl.create_default_context()
-URL = "https://croak-grinch-luxury.ngrok-free.dev/"
+URL = os.environ.get("ANKI_MCP_URL", "https://seu-dominio.ngrok-free.dev/")
 
 def send_rpc(payload, session_id=None):
     headers = {

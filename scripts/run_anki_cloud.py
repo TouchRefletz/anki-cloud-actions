@@ -28,6 +28,8 @@ import urllib.request
 import zipfile
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+import urllib.error
+from socketserver import ThreadingMixIn
 from threading import Thread
 
 logging.basicConfig(
@@ -472,51 +474,115 @@ gui_hooks.profile_did_open.append(on_profile_loaded)
     logger.info("Addon auxiliar de sincronização (100% headless) instalado.")
 
 
-class HealthHandler(BaseHTTPRequestHandler):
-    """Servidor leve de Health Check e Shutdown para a IA consultar."""
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
 
-    def do_GET(self):
-        if self.path in ["/health", "/status", "/"]:
+
+class CloudGatewayHandler(BaseHTTPRequestHandler):
+    """
+    Gateway reverso na porta 3142 (exposta pelo Ngrok):
+    - Intercepta /__cloud_health e /__cloud_shutdown (para o Cloudflare Worker e anki-stop.yml)
+    - Repassa todas as outras rotas (como / do MCP) para 127.0.0.1:3141 (AnkiMCP Server).
+    """
+
+    def _send_cors_json(self, status_code, payload):
+        body = json.dumps(payload, indent=2).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_cloud_routes(self):
+        if self.path in ["/__cloud_health", "/health"]:
             now = time.time()
             elapsed_m = round((now - START_TIME) / 60, 1)
             remaining_m = max(0.0, round(DURATION_MINUTES - elapsed_m, 1))
-
-            data = {
-                "status": "online",
+            self._send_cors_json(200, {
+                "status": "shutting_down" if SHUTDOWN_FILE.exists() else "online",
                 "uptime_minutes": elapsed_m,
                 "remaining_minutes": remaining_m,
                 "total_duration_minutes": DURATION_MINUTES,
                 "mcp_port": 3141,
                 "ankiconnect_port": 8765,
                 "ankiweb_synced": SYNC_FLAG_FILE.exists(),
-            }
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(json.dumps(data, indent=2).encode())
+            })
+            return True
 
-        elif self.path == "/shutdown":
+        if self.path in ["/__cloud_shutdown", "/shutdown"]:
             SHUTDOWN_FILE.touch()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self._send_cors_json(200, {
+                "status": "shutting_down",
+                "message": "Sinal de desligamento recebido! O Anki está sincronizando com o AnkiWeb e encerrará em segundos.",
+            })
+            return True
+
+        return False
+
+    def _proxy_to_ankimcp(self, method):
+        if self._handle_cloud_routes():
+            return
+
+        content_len = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(content_len) if content_len > 0 else None
+
+        target_url = f"http://127.0.0.1:3141{self.path}"
+        fwd_headers = {}
+        for k, v in self.headers.items():
+            if k.lower() not in ("host", "content-length", "transfer-encoding", "connection"):
+                fwd_headers[k] = v
+        fwd_headers["Host"] = "127.0.0.1:3141"
+
+        req = urllib.request.Request(target_url, data=body, headers=fwd_headers, method=method)
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                resp_body = resp.read()
+                self.send_response(resp.status)
+                for k, v in resp.headers.items():
+                    if k.lower() not in ("transfer-encoding", "connection", "content-length"):
+                        self.send_header(k, v)
+                self.send_header("Content-Length", str(len(resp_body)))
+                self.end_headers()
+                self.wfile.write(resp_body)
+        except urllib.error.HTTPError as e:
+            err_body = e.read()
+            self.send_response(e.code)
+            for k, v in e.headers.items():
+                if k.lower() not in ("transfer-encoding", "connection", "content-length"):
+                    self.send_header(k, v)
+            self.send_header("Content-Length", str(len(err_body)))
             self.end_headers()
-            self.wfile.write(b'{"status": "shutting_down", "message": "Sincronizando com AnkiWeb e encerrando..."}')
-        else:
-            self.send_response(404)
-            self.end_headers()
+            self.wfile.write(err_body)
+        except Exception as e:
+            self._send_cors_json(502, {"error": "ankimcp_unreachable", "detail": str(e)})
+
+    def do_GET(self):
+        self._proxy_to_ankimcp("GET")
+
+    def do_POST(self):
+        self._proxy_to_ankimcp("POST")
+
+    def do_DELETE(self):
+        self._proxy_to_ankimcp("DELETE")
+
+    def do_OPTIONS(self):
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "*")
+        self.end_headers()
 
     def log_message(self, format, *args):
         return
 
 
 def start_health_server():
-    """Inicia servidor de health check na porta 3142."""
-    server = HTTPServer(("0.0.0.0", 3142), HealthHandler)
+    """Inicia gateway reverso + health/shutdown server na porta 3142."""
+    server = ThreadingHTTPServer(("0.0.0.0", 3142), CloudGatewayHandler)
     t = Thread(target=server.serve_forever, daemon=True)
     t.start()
-    logger.info("Health Check server ativo na porta 3142.")
+    logger.info("Cloud Gateway + Health/Shutdown server ativo na porta 3142 (-> AnkiMCP 3141).")
 
 
 def wait_for_port(port, timeout=90):
@@ -544,7 +610,7 @@ def start_ngrok():
     logger.info("Configurando Ngrok Authtoken...")
     subprocess.run(["ngrok", "config", "add-authtoken", NGROK_AUTHTOKEN], check=True)
 
-    ngrok_cmd = ["ngrok", "http", "127.0.0.1:3141", "--log", "stdout"]
+    ngrok_cmd = ["ngrok", "http", "127.0.0.1:3142", "--log", "stdout"]
     if NGROK_DOMAIN:
         ngrok_cmd.extend(["--domain", NGROK_DOMAIN, "--host-header", "rewrite"])
 

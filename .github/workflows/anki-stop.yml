@@ -7,23 +7,34 @@ on:
 
 permissions:
   actions: write
+  contents: read
 
 jobs:
   stop-anki:
     runs-on: ubuntu-latest
     steps:
-      - name: Encerrar Instâncias Ativas do Anki Server
+      - name: Encerrar Instâncias Ativas do Anki Server (Sync Gracioso + Fallback)
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NGROK_DOMAIN: ${{ secrets.NGROK_DOMAIN }}
         run: |
-          echo "Buscando execuções ativas do Anki Cloud Server..."
-          RUN_IDS=$(gh run list --workflow="anki-server.yml" --status="in_progress" --json databaseId -q '.[].databaseId')
+          if [ -n "$NGROK_DOMAIN" ]; then
+            echo "Enviando sinal de desligamento gracioso via Ngrok (/__cloud_shutdown)..."
+            curl -s -X POST "https://${NGROK_DOMAIN}/__cloud_shutdown" \
+              -H "ngrok-skip-browser-warning: true" || true
+            echo "Aguardando 25 segundos para o upload completo da coleção ao AnkiWeb..."
+            sleep 25
+          fi
+
+          echo "Verificando se ainda restam execuções ativas do Anki Cloud Server..."
+          RUN_IDS=$(gh run list -R "${{ github.repository }}" --workflow="anki-server.yml" --status="in_progress" --json databaseId -q '.[].databaseId')
           if [ -z "$RUN_IDS" ]; then
-            echo "Nenhuma execução ativa do Anki Server encontrada."
+            echo "✅ Todas as execuções já finalizaram graciosamente!"
           else
             for ID in $RUN_IDS; do
-              echo "Cancelando execução ID: $ID..."
-              gh run cancel "$ID" || true
+              echo "Cancelando execução restante ID: $ID..."
+              gh run cancel "$ID" -R "${{ github.repository }}" || true
             done
             echo "Todas as instâncias ativas receberam ordem de encerramento."
           fi
+
