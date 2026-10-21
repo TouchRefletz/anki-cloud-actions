@@ -478,6 +478,58 @@ class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
     daemon_threads = True
 
 
+ID_KEYS = {"id", "note_id", "note_ids", "notes", "card_id", "card_ids", "deck_id", "deck_ids"}
+
+
+def _patch_schema_ids_to_number(schema):
+    """Converte recursivamente campos de ID de 'integer' para 'number' no schema JSON do MCP."""
+    if not isinstance(schema, dict):
+        return
+    props = schema.get("properties")
+    if isinstance(props, dict):
+        for k, v in props.items():
+            if k in ID_KEYS and isinstance(v, dict):
+                if v.get("type") == "integer":
+                    v["type"] = "number"
+                elif v.get("type") == "array" and isinstance(v.get("items"), dict) and v["items"].get("type") == "integer":
+                    v["items"]["type"] = "number"
+    defs = schema.get("$defs")
+    if isinstance(defs, dict):
+        for dval in defs.values():
+            _patch_schema_ids_to_number(dval)
+
+
+def _sanitize_incoming_id_args(obj):
+    """Converte floats exatos (ex: 1791317144484.0) ou strings de volta para int antes de entregar ao AnkiMCP."""
+    if not isinstance(obj, dict):
+        return obj
+    for k, v in list(obj.items()):
+        if k in ID_KEYS:
+            if isinstance(v, float) and v.is_integer():
+                obj[k] = int(v)
+            elif isinstance(v, str) and v.replace(".0", "").isdigit():
+                obj[k] = int(float(v))
+            elif isinstance(v, list):
+                new_list = []
+                for item in v:
+                    if isinstance(item, float) and item.is_integer():
+                        new_list.append(int(item))
+                    elif isinstance(item, str) and item.replace(".0", "").isdigit():
+                        new_list.append(int(float(item)))
+                    elif isinstance(item, dict):
+                        new_list.append(_sanitize_incoming_id_args(item))
+                    else:
+                        new_list.append(item)
+                obj[k] = new_list
+        elif isinstance(v, dict):
+            _sanitize_incoming_id_args(v)
+        elif isinstance(v, list):
+            for item in v:
+                if isinstance(item, dict):
+                    _sanitize_incoming_id_args(item)
+    return obj
+
+
 class CloudGatewayHandler(BaseHTTPRequestHandler):
     """
     Gateway reverso na porta 3142 (exposta pelo Ngrok):
@@ -526,6 +578,21 @@ class CloudGatewayHandler(BaseHTTPRequestHandler):
 
         content_len = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_len) if content_len > 0 else None
+        is_tools_list = False
+
+        if body:
+            try:
+                rpc_req = json.loads(body.decode("utf-8"))
+                if isinstance(rpc_req, dict):
+                    if rpc_req.get("method") == "tools/list":
+                        is_tools_list = True
+                    elif rpc_req.get("method") == "tools/call":
+                        args = rpc_req.get("params", {}).get("arguments")
+                        if isinstance(args, dict):
+                            _sanitize_incoming_id_args(args)
+                            body = json.dumps(rpc_req).encode("utf-8")
+            except Exception:
+                pass
 
         target_url = f"http://127.0.0.1:3141{self.path}"
         fwd_headers = {}
@@ -538,6 +605,16 @@ class CloudGatewayHandler(BaseHTTPRequestHandler):
         try:
             with urllib.request.urlopen(req, timeout=60) as resp:
                 resp_body = resp.read()
+                if is_tools_list and resp_body:
+                    try:
+                        rpc_resp = json.loads(resp_body.decode("utf-8"))
+                        tools = rpc_resp.get("result", {}).get("tools", [])
+                        for t in tools:
+                            if isinstance(t, dict) and "inputSchema" in t:
+                                _patch_schema_ids_to_number(t["inputSchema"])
+                        resp_body = json.dumps(rpc_resp).encode("utf-8")
+                    except Exception:
+                        pass
                 self.send_response(resp.status)
                 for k, v in resp.headers.items():
                     if k.lower() not in ("transfer-encoding", "connection", "content-length"):
