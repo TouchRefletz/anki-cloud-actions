@@ -482,17 +482,17 @@ ID_KEYS = {"id", "note_id", "note_ids", "notes", "card_id", "card_ids", "deck_id
 
 
 def _patch_schema_ids_to_number(schema):
-    """Converte recursivamente campos de ID de 'integer' para 'number' no schema JSON do MCP."""
+    """Converte recursivamente campos de ID de 'integer' para 'string' no schema JSON do MCP."""
     if not isinstance(schema, dict):
         return
     props = schema.get("properties")
     if isinstance(props, dict):
         for k, v in props.items():
             if k in ID_KEYS and isinstance(v, dict):
-                if v.get("type") == "integer":
-                    v["type"] = "number"
-                elif v.get("type") == "array" and isinstance(v.get("items"), dict) and v["items"].get("type") == "integer":
-                    v["items"]["type"] = "number"
+                if v.get("type") in ("integer", "number"):
+                    v["type"] = "string"
+                elif v.get("type") == "array" and isinstance(v.get("items"), dict) and v["items"].get("type") in ("integer", "number"):
+                    v["items"]["type"] = "string"
     defs = schema.get("$defs")
     if isinstance(defs, dict):
         for dval in defs.values():
